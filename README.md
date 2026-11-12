@@ -1,39 +1,47 @@
-# Pokétwo
 
-| :bangbang: | Pokétwo is currently undergoing a full rewrite—if you're looking to contribute, please be advised that I do not intend to make too many changes to the current version. |
-| :--------: | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+# PokeMatrix
 
-[![Discord](https://img.shields.io/discord/716390832034414685?logo=discord&style=for-the-badge)](https://discord.gg/QyEWy4C)
-![Python](https://img.shields.io/badge/Python-3.8-red?style=for-the-badge)
-![License](https://img.shields.io/github/license/oliver-ni/poketwo?style=for-the-badge)
+<p align="center">
+  <img src="pokematrix-logo.png" alt="PokeMatrix Logo" width="450">
+</p>
 
-A Pokémon-oriented Discord bot that lets you collect pokémon. Catch pokémon in the wild, level your pokémon, compete with your friends, and more.
+<p align="center">
+  <strong>Gotta catch 'em all, on Matrix.</strong>
+  <br>
+  A community-driven Pokémon collecting game for the Matrix ecosystem.
+</p>
 
-The source code here is provided for educational purposes. I would recommend against running your own instance of this bot. Instead, use `@Pokétwo invite` and [click the link](https://invite.poketwo.net) to add the bot to your server.
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge" alt="Python">
+  <img src="https://img.shields.io/github/license/xxxtrashcion/poketwo-matrix?style=for-the-badge" alt="License">
+  <img src="https://img.shields.io/badge/Platform-Matrix-green?style=for-the-badge" alt="Matrix">
+  <img src="https://img.shields.io/badge/Status-Early%20Development-orange?style=for-the-badge" alt="Development Status">
+</p>
+
+---
+
+PokeMatrix is an open-source Pokémon collecting game for the [Matrix](https://matrix.org/) ecosystem.
+
+Inspired by the original [Pokécord](https://github.com/PokeCord/PokeCord) and built upon the open-source codebase of [Pokétwo](https://github.com/poketwo/poketwo), PokeMatrix aims to bring the complete Pokémon collecting experience to Matrix communities.
+
+Catch Pokémon as they appear in chat rooms, build your collection, complete your Pokédex, level up, evolve, trade, battle, and compete with other players.
+
+> **Development Status:** Early development. PokeMatrix is not yet functional as a Matrix bot. The original Pokétwo codebase is currently being adapted for Matrix compatibility.
 
 ## Contributing
 
-I'm open to contributions. Please, however, make an issue first if you want to contribute to the bot.
+Contributions are welcome! Please open an issue before starting substantial work so proposed changes can be discussed and coordinated.
 
-Right now, the code's still quite convoluted. I am working on refactoring and reorganizing the project.
+The original Pokétwo codebase contains tightly coupled Discord-specific components. Development will focus on separating game logic from platform-specific functionality while preserving the original gameplay experience.
 
-## Roadmap
+## Credits and Acknowledgements
 
-I'm looking to add the following major features to the bot, in addition to QoL fixes and small updates:
+PokeMatrix builds upon the work and ideas of projects that helped establish Pokémon collecting bots in online communities.
 
-- Pokémon
-  - The rest of the forms
-  - Gender differences
-  - More customizations options, like Pokéballs
-- Battling
-  - Different modes (1v1, 3v3, team battles, etc.)
-  - TMs and HMs
-  - Abilities
-  - Fully implementing status moves
-  - A way to train EVs
-  - Cosmetics like custom backgrounds
-- Other
-  - Daily/weekly quests with rewards
-  - Achievements/profile badges
-  - Egg hatching/breeding
-  - Generally more customization options
+- **[Pokécord](https://github.com/PokeCord/PokeCord)** – The original Pokémon collecting bot that popularized the concept and inspired subsequent projects.
+- **[Pokétwo](https://github.com/poketwo/poketwo)** – The open-source project whose codebase serves as the foundation for PokeMatrix. Special thanks to its developers and contributors for making their work available to the community.
+- **[Matrix](https://matrix.org/)** – The open communication protocol and ecosystem that makes this adaptation possible.
+
+PokeMatrix is an independent community project. It is not affiliated with or endorsed by Pokécord, Pokétwo, Discord, Nintendo, The Pokémon Company, or Game Freak.
+
+
