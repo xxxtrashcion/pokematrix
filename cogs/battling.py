@@ -12,10 +12,10 @@ import discord
 from discord.ext import commands, tasks
 from cogs.mongo import Pokemon
 
-import data.constants
 from data import models
 from helpers import checks, constants, converters, pagination, flags
 from helpers.utils import add_moves_field
+from game.battling.turn_order import get_priority
 
 if TYPE_CHECKING:
     from bot import ClusterBot
@@ -28,18 +28,6 @@ def in_battle(bool=True):
         raise commands.CheckFailure(f"You're {'not' if bool else 'already'} in a battle!")
 
     return commands.check(predicate)
-
-
-def get_priority(action, selected):
-    if action["type"] == "move":
-        s = selected.spd
-        if "Paralysis" in selected.ailments:
-            s *= 0.5
-        return (
-            action["value"].priority * 1e20 + selected.spd * data.constants.STAT_STAGE_MULTIPLIERS[selected.stages.spd]
-        )
-
-    return 1e99
 
 
 class Stage(Enum):
