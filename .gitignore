@@ -126,3 +126,6 @@ dmypy.json
 
 # jetbrains
 .idea/
+
+# Local virtual environments
+.venv/
