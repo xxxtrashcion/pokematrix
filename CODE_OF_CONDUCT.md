@@ -1,34 +1,65 @@
-# Pokétwo Community Code of Conduct
 
-The goal of this document is to help maintain a healthy, respectful community. Please don’t take this as an exhaustive list of things you can or cannot do; rather, try to be your best self. Behavior that moderators find inappropriate, whether listed in the Code of Conduct, the Community Rules, or not, is also not allowed.
+# Code of Conduct
 
-## Our Pledge
+## Our commitment
 
-We are committed to providing a friendly, safe and welcoming environment for all, regardless of level of experience, gender identity and expression, sexual orientation, disability, personal appearance, body size, race, ethnicity, age, religion, nationality, or other similar characteristics.
+PokeMatrix is a community-driven project. We want everyone contributing to feel welcome, respected, and comfortable participating.
 
-## Our Standards
+We welcome contributors regardless of experience level, background, or familiarity with the project.
 
-### Examples of behavior that contributes to creating a positive environment include:
+## Expected behavior
 
-* Being kind and courteous to others
-* Using welcoming and inclusive language
-* Being respectful of differing viewpoints and experiences
-* Collaborating with other server members
-* Gracefully accepting constructive criticism
-* Focusing on what is best for the community
-* Showing empathy towards other server members
+Everyone participating in the project is expected to:
 
-### Examples of unacceptable behavior by participants include:
+- Be respectful and considerate.
+- Give constructive feedback.
+- Be open to different ideas and approaches.
+- Respect other contributors' time and effort.
+- Keep discussions focused on the project.
+- Accept reasonable criticism and differing opinions.
 
-* The use of sexualized language or imagery and sexual attention or advances
-* The use of inappropriate images, including in a server member's avatar
-* The use of inappropriate language, including in a server member's username or nickname
-* Any spamming, flaming, baiting or other attention-stealing behavior
-* Any harassment, whether public or private
-* Trolling, insulting/derogatory comments, and personal or political attacks
-* Promoting or spreading disinformation, lies, or conspiracy theories against a person, group, organization, project, or community
-* Publishing others' private information, such as a physical or electronic address, without explicit permission
+You don't have to agree with everyone, but you do need to treat them with respect.
 
-## Attribution
+## Unacceptable behavior
 
-This Code of Conduct is adapted from the [Adafruit Community Code of Conduct](https://github.com/adafruit/Adafruit_Community_Code_of_Conduct/blob/main/code-of-conduct.md).
+The following behavior is not acceptable:
+
+- Harassment, threats, or intimidation.
+- Discriminatory or hateful language.
+- Personal attacks or deliberate hostility.
+- Sharing someone's private information without permission.
+- Trolling, deliberate disruption, or repeated bad-faith behavior.
+- Any other conduct that makes the project hostile or unsafe for others.
+
+## Reporting issues
+
+If you experience or witness behavior that violates this code, please contact a project maintainer privately.
+
+Please avoid turning personal disputes into public arguments or discussion threads.
+
+Reports will be handled as discreetly as possible.
+
+## Enforcement
+
+Project maintainers are responsible for enforcing this code of conduct.
+
+Depending on the situation, actions may include:
+
+- A warning.
+- Removal of inappropriate content.
+- Temporary restrictions on participation.
+- Removal from the project or its community spaces.
+
+Maintainers may take action when necessary to keep the project welcoming and productive.
+
+## Scope
+
+This code of conduct applies to all PokeMatrix project spaces, including:
+
+- GitHub repositories and discussions.
+- Pull requests and issues.
+- Matrix rooms used for project development.
+- Other spaces where someone is representing or participating in the PokeMatrix project.
+
+Thank you for helping make PokeMatrix a welcoming place to collaborate.
+
