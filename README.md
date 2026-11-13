@@ -26,13 +26,40 @@ Inspired by the original [Pokécord](https://github.com/PokeCord/PokeCord) and b
 
 Catch Pokémon as they appear in chat rooms, build your collection, complete your Pokédex, level up, evolve, trade, battle, and compete with other players.
 
-> **Development Status:** Early development. PokeMatrix is not yet functional as a Matrix bot. The original Pokétwo codebase is currently being adapted for Matrix compatibility.
+> **Development Status:** Early development. A basic Matrix client runner is available for testing; game commands and Pokémon spawning are not yet ported.
 
 ## Contributing
 
 Contributions are welcome! Please open an issue before starting substantial work so proposed changes can be discussed and coordinated.
 
 The original Pokétwo codebase contains tightly coupled Discord-specific components. Development will focus on separating game logic from platform-specific functionality while preserving the original gameplay experience.
+
+## Matrix Development Runner
+
+Use Python 3.10, then install the dependencies without trying to package this repository:
+
+```sh
+poetry env use python3.10
+poetry install --no-root
+```
+
+Copy the tracked template to your local, Git-ignored `.env` file, then fill in its values:
+
+```sh
+cp .env.example .env
+```
+
+```dotenv
+MATRIX_HOMESERVER=https://your-homeserver
+MATRIX_ROOM_ID=!room-id:your-homeserver
+# Optional; defaults to @pokematrix:theeze.dev
+MATRIX_USER_ID=@pokematrix:theeze.dev
+# Optional; use a separate database name for Matrix data
+MATRIX_DATABASE_URI=mongodb://your-mongodb-host
+MATRIX_DATABASE_NAME=pokematrix_matrix
+```
+
+Start the bot with `poetry run python bot.py`. On first start, it prompts for the account password and saves the session locally in `.matrix-session.json`. In the room, send `!matrix-ping` to check that the bot can receive and reply to messages. Send `!start` to see starter choices, then `!pick Bulbasaur` (or another listed starter) to choose one. Starter selection requires both database settings; it creates the player in the existing `member` collection and the starter in `pokemon`. Use an unencrypted room for now; end-to-end encryption is not enabled.
 
 ## Credits and Acknowledgements
 

@@ -51,7 +51,7 @@ class PokemonBase(MixinDocument):
     # General
     id = fields.ObjectIdField(attribute="_id")
     timestamp = fields.DateTimeField(default=datetime.utcnow)
-    owner_id = fields.IntegerField(required=True)
+    owner_id = fields.StringField(required=True)
     idx = fields.IntegerField(required=True)
 
     # Details
@@ -286,18 +286,18 @@ class Member(Document):
         strict = False
 
     # General
-    id = fields.IntegerField(attribute="_id")
+    id = fields.StringField(attribute="_id")
     username = fields.StringField(attribute="username")
     joined_at = fields.DateTimeField(default=None)
     suspended = fields.BooleanField(default=False)
     suspended_until = fields.DateTimeField(default=datetime.min)
     suspension_reason = fields.StringField(default=None)
-    private_message_id = fields.IntegerField(default=None)
+    private_room_id = fields.StringField(default=None)
     tos = fields.DateTimeField(default=None)
 
     # Pokémon
     next_idx = fields.IntegerField(default=1)
-    selected_id = fields.ObjectIdField(required=True)
+    selected_id = fields.ObjectIdField(default=None)
     order_by = fields.StringField(default="number")
 
     # Pokédex
@@ -544,15 +544,17 @@ class Time(Enum):
 
 
 class Guild(Document):
+    """Matrix Space/community configuration; room identifiers are Matrix room IDs."""
+
     class Meta:
         strict = False
 
-    id = fields.IntegerField(attribute="_id")
-    channel = fields.IntegerField(default=None)
-    channels = fields.ListField(fields.IntegerField, default=list)
+    id = fields.StringField(attribute="_id")
+    channel = fields.StringField(default=None)
+    channels = fields.ListField(fields.StringField, default=list)
     silence = fields.BooleanField(default=False)
     display_images = fields.BooleanField(default=True)
-    auction_channel = fields.IntegerField(default=None)
+    auction_channel = fields.StringField(default=None)
 
     lat = fields.FloatField(default=37.7790262)
     lng = fields.FloatField(default=-122.4199061)
@@ -574,11 +576,13 @@ class Guild(Document):
 
 
 class Channel(Document):
+    """Matrix room state, optionally grouped under a Matrix Space."""
+
     class Meta:
         strict = False
 
-    id = fields.IntegerField(attribute="_id")
-    guild_id = fields.IntegerField()
+    id = fields.StringField(attribute="_id")
+    guild_id = fields.StringField(default=None)
     spawns_remaining = fields.IntegerField(default=0)
     _incense = fields.DictField(attribute="incense", default=dict)
 
@@ -586,12 +590,12 @@ class Channel(Document):
     def incense(self):
         if self.spawns_remaining > 0:
             return Incense(
-                channel_id=int(self.id),
+                channel_id=self.id,
                 spawns_remaining=self.spawns_remaining,
                 interval=DEFAULT_INTERVAL,
                 old_system=True,
             )
-        return Incense(channel_id=int(self.id), **self._incense)
+        return Incense(channel_id=self.id, **self._incense)
 
     @property
     def incense_active(self):
@@ -604,14 +608,89 @@ class Counter(Document):
 
 
 class Blacklist(Document):
-    id = fields.IntegerField(attribute="_id")
+    id = fields.StringField(attribute="_id")
 
 
 class Sponsor(Document):
     id = fields.IntegerField(attribute="_id")
-    discord_id = fields.IntegerField(default=None)
+    matrix_user_id = fields.StringField(default=None)
     reward_date = fields.DateTimeField()
     reward_tier = fields.IntegerField()
+
+
+class MatrixMongo:
+    def __init__(self, database, client=None):
+        self.database = database
+        self.client = client
+
+    @classmethod
+    def connect(cls, uri: str, database_name: str):
+        client = AsyncIOMotorClient(uri)
+        return cls(client[database_name], client)
+
+    async def ping(self):
+        return await self.database.command("ping")
+
+    async def fetch_member(self, matrix_user_id: str):
+        return await self.database.member.find_one({"_id": matrix_user_id})
+
+    async def ensure_member(self, matrix_user_id: str, username: Optional[str] = None):
+        update = {"$setOnInsert": {"selected_id": None}}
+        if username is not None:
+            update["$set"] = {"username": username}
+        await self.database.member.update_one({"_id": matrix_user_id}, update, upsert=True)
+        return await self.fetch_member(matrix_user_id)
+
+    async def start_player(
+        self,
+        matrix_user_id: str,
+        species: models.Species,
+        display_name: Optional[str] = None,
+    ) -> bool:
+        member = await self.ensure_member(matrix_user_id, display_name)
+        if member.get("selected_id") is not None:
+            return False
+
+        pokemon_id = ObjectId()
+        ivs = [random_iv() for _ in range(6)]
+        level = 1
+        possible_moves = [move.move.id for move in species.moves if move.method.level <= level]
+        pokemon = {
+            "_id": pokemon_id,
+            "timestamp": datetime.utcnow(),
+            "owner_id": matrix_user_id,
+            "owned_by": "user",
+            "idx": 1,
+            "species_id": species.id,
+            "level": level,
+            "xp": 0,
+            "nature": random_nature(),
+            "shiny": random.randint(1, 4096) == 1,
+            "gender": generate_gender(species, _id=pokemon_id),
+            "iv_hp": ivs[0],
+            "iv_atk": ivs[1],
+            "iv_defn": ivs[2],
+            "iv_satk": ivs[3],
+            "iv_sdef": ivs[4],
+            "iv_spd": ivs[5],
+            "iv_total": sum(ivs),
+            "moves": random.sample(possible_moves, k=min(len(possible_moves), 4)),
+        }
+
+        await self.database.pokemon.insert_one(pokemon)
+        result = await self.database.member.update_one(
+            {"_id": matrix_user_id, "selected_id": None},
+            {"$set": {"selected_id": pokemon_id, "joined_at": datetime.utcnow(), "next_idx": 2}},
+        )
+        if result.matched_count == 0:
+            await self.database.pokemon.delete_one({"_id": pokemon_id})
+            return False
+
+        return True
+
+    def close(self):
+        if self.client is not None:
+            self.client.close()
 
 
 class Mongo(commands.Cog):
@@ -639,56 +718,77 @@ class Mongo(commands.Cog):
             setattr(self, x, instance.register(g[x]))
             getattr(self, x).bot = bot
 
-    async def fetch_member_info(self, member: discord.Member | Member) -> Member:
-        val = await self.bot.redis.hget(f"db:member", int(int(member.id)))
+    @staticmethod
+    def _matrix_id(value) -> str:
+        identifier = value if isinstance(value, str) else getattr(value, "id", value)
+        if identifier is None:
+            raise ValueError("A Matrix user or room ID is required.")
+        return str(identifier)
+
+    def _member_cache(self):
+        return getattr(self.bot, "redis", None)
+
+    async def fetch_member_info(self, member, display_name: Optional[str] = None) -> Member:
+        matrix_user_id = self._matrix_id(member)
+        display_name = (
+            display_name
+            or getattr(member, "display_name", None)
+            or getattr(member, "name", None)
+            or getattr(member, "username", None)
+        )
+        cache = self._member_cache()
+        val = await cache.hget("db:member", matrix_user_id) if cache is not None else None
         if val is None:
-            val = await self.Member.find_one({"id": int(member.id)}, {"pokemon": 0, "pokedex": 0})
+            val = await self.Member.find_one({"_id": matrix_user_id}, {"pokemon": 0, "pokedex": 0})
             v = "" if val is None else pickle.dumps(val.to_mongo())
-            await self.bot.redis.hset(f"db:member", int(member.id), v)
+            if cache is not None:
+                await cache.hset("db:member", matrix_user_id, v)
         elif len(val) == 0:
             return None
         else:
             val = self.Member.build_from_mongo(pickle.loads(val))
 
-        # If username in the database doesn't match with current username, update
-        if (val and isinstance(member, (discord.Member, discord.User))) and val.username != member.name:
-            result = await self.update_member(member, {"$set": {"username": member.name}})
-            # Set it for the Member object to be returned as well, if modified successfully.
-            # This check is not really necessary since it wouldn't get this far anyway if it doesn't
-            # find any records, but doesn't hurt to have it still as a measure against any edge cases.
+        if val and display_name and val.username != display_name:
+            result = await self.update_member(matrix_user_id, {"$set": {"username": display_name}})
             if result.modified_count > 0:
-                val.username = member.name
+                val.username = display_name
 
         return val
 
-    async def fetch_member_setting(self, member: discord.Member | Member, setting: str):
-        return (await self.Member.find_one({"id": int(member.id)}, {setting: 1}))[setting]
+    async def fetch_member_setting(self, member, setting: str):
+        return (await self.Member.find_one({"_id": self._matrix_id(member)}, {setting: 1}))[setting]
 
-    async def fetch_next_idx(self, member: discord.Member | Member, reserve=1):
+    async def fetch_next_idx(self, member, reserve=1):
+        matrix_user_id = self._matrix_id(member)
         result = await self.db.member.find_one_and_update(
-            {"_id": int(member.id)},
+            {"_id": matrix_user_id},
             {"$inc": {"next_idx": reserve}},
             projection={"next_idx": 1},
         )
-        await self.bot.redis.hdel(f"db:member", int(member.id))
+        cache = self._member_cache()
+        if cache is not None:
+            await cache.hdel("db:member", matrix_user_id)
         return result["next_idx"]
 
-    async def reset_idx(self, member: discord.Member | Member, value):
+    async def reset_idx(self, member, value):
+        matrix_user_id = self._matrix_id(member)
         result = await self.db.member.find_one_and_update(
-            {"_id": int(member.id)},
+            {"_id": matrix_user_id},
             {"$set": {"next_idx": value}},
             projection={"next_idx": 1},
         )
-        await self.bot.redis.hdel(f"db:member", int(member.id))
+        cache = self._member_cache()
+        if cache is not None:
+            await cache.hdel("db:member", matrix_user_id)
         return result["next_idx"]
 
-    async def fetch_pokedex(self, member: discord.Member | Member, start: int, end: int):
+    async def fetch_pokedex(self, member, start: int, end: int):
         filter_obj = {"claimed_pokedex_rewards": 1, "notified_milestones": 1}
 
         for i in range(start, end):
             filter_obj[f"pokedex.{i}"] = 1
 
-        return await self.Member.find_one({"id": int(member.id)}, filter_obj)
+        return await self.Member.find_one({"_id": self._matrix_id(member)}, filter_obj)
 
     def fetch_market_list(self, aggregations=[]):
         pipeline = [
@@ -698,15 +798,17 @@ class Mongo(commands.Cog):
         return self.db.pokemon.aggregate(pipeline, allowDiskUse=True)
 
     def fetch_auction_list(self, guild, aggregations=[]):
+        matrix_space_id = self._matrix_id(guild)
         pipeline = [
-            {"$match": {"owned_by": "auction", "auction_data.guild_id": guild.id}},
+            {"$match": {"owned_by": "auction", "auction_data.guild_id": matrix_space_id}},
             *aggregations,
         ]
         return self.db.pokemon.aggregate(pipeline, allowDiskUse=True)
 
     async def fetch_auction_count(self, guild, aggregations=[]):
+        matrix_space_id = self._matrix_id(guild)
         pipeline = [
-            {"$match": {"owned_by": "auction", "auction_data.guild_id": guild.id}},
+            {"$match": {"owned_by": "auction", "auction_data.guild_id": matrix_space_id}},
             *aggregations,
             {"$count": "num_matches"},
         ]
@@ -717,19 +819,21 @@ class Mongo(commands.Cog):
 
         return result[0]["num_matches"]
 
-    async def fetch_pokemon_list(self, member: discord.Member | Member, aggregations=[]):
+    async def fetch_pokemon_list(self, member, aggregations=[]):
+        matrix_user_id = self._matrix_id(member)
         pipeline = [
-            {"$match": {"owner_id": int(member.id), "owned_by": "user"}},
+            {"$match": {"owner_id": matrix_user_id, "owned_by": "user"}},
             *aggregations,
         ]
         async for x in self.db.pokemon.aggregate(pipeline, allowDiskUse=True):
-            yield self.bot.mongo.Pokemon.build_from_mongo(x)
+            yield self.Pokemon.build_from_mongo(x)
 
-    async def fetch_pokemon_count(self, member: discord.Member | Member, aggregations=[], *, max_time_ms=None):
+    async def fetch_pokemon_count(self, member, aggregations=[], *, max_time_ms=None):
+        matrix_user_id = self._matrix_id(member)
         kwargs = {"maxTimeMS": max_time_ms} if max_time_ms else {}
         result = await self.db.pokemon.aggregate(
             [
-                {"$match": {"owner_id": int(member.id), "owned_by": "user"}},
+                {"$match": {"owner_id": matrix_user_id, "owned_by": "user"}},
                 *aggregations,
                 {"$count": "num_matches"},
             ],
@@ -742,10 +846,11 @@ class Mongo(commands.Cog):
 
         return result[0]["num_matches"]
 
-    async def fetch_pokedex_count(self, member: discord.Member | Member, aggregations=[]):
+    async def fetch_pokedex_count(self, member, aggregations=[]):
+        matrix_user_id = self._matrix_id(member)
         result = await self.db.member.aggregate(
             [
-                {"$match": {"_id": int(member.id)}},
+                {"$match": {"_id": matrix_user_id}},
                 {"$project": {"pokedex": {"$objectToArray": "$pokedex"}}},
                 {"$unwind": {"path": "$pokedex"}},
                 {"$replaceRoot": {"newRoot": "$pokedex"}},
@@ -760,10 +865,11 @@ class Mongo(commands.Cog):
 
         return result[0]["result"]
 
-    async def fetch_pokedex_sum(self, member: discord.Member | Member, aggregations=[]):
+    async def fetch_pokedex_sum(self, member, aggregations=[]):
+        matrix_user_id = self._matrix_id(member)
         result = await self.db.member.aggregate(
             [
-                {"$match": {"_id": int(member.id)}},
+                {"$match": {"_id": matrix_user_id}},
                 {"$project": {"pokedex": {"$objectToArray": "$pokedex"}}},
                 {"$unwind": {"path": "$pokedex"}},
                 {"$replaceRoot": {"newRoot": "$pokedex"}},
@@ -780,7 +886,7 @@ class Mongo(commands.Cog):
 
     async def make_pokemon(
         self,
-        member: discord.User | discord.Member | Member,
+        member,
         species: models.Species,
         *,
         shiny_boost: Optional[int] = 1,
@@ -820,7 +926,7 @@ class Mongo(commands.Cog):
 
         # Not sure if this instance check is the best way to do this, but isinstance does not work
         is_member_document = getattr(getattr(member, "opts", None), "template", None) == Member
-        if not is_member_document and hasattr(member, "id"):
+        if not is_member_document:
             member = await self.fetch_member_info(member)
 
         ivs = [random_iv() for _ in range(6)]
@@ -838,7 +944,7 @@ class Mongo(commands.Cog):
         idx = kwargs.pop("idx", None) or await self.fetch_next_idx(member)
 
         return {
-            "owner_id": int(member.id),
+            "owner_id": self._matrix_id(member),
             "owned_by": "user",
             "species_id": species.id,
             "level": level,
@@ -859,10 +965,11 @@ class Mongo(commands.Cog):
         }
 
     async def update_member(self, member, update):
-        if hasattr(member, "id"):
-            member = member.id
-        result = await self.db.member.update_one({"_id": member}, update)
-        await self.bot.redis.hdel(f"db:member", int(member))
+        matrix_user_id = self._matrix_id(member)
+        result = await self.db.member.update_one({"_id": matrix_user_id}, update)
+        cache = self._member_cache()
+        if cache is not None:
+            await cache.hdel("db:member", matrix_user_id)
         return result
 
     async def update_pokemon(self, pokemon: Pokemon | dict, update: dict):
@@ -880,15 +987,16 @@ class Mongo(commands.Cog):
 
         return await self.db.pokemon.update_one({"_id": pokemon_id}, update)
 
-    async def fetch_pokemon(self, member: discord.Member, idx: int):
+    async def fetch_pokemon(self, member, idx: int):
+        matrix_user_id = self._matrix_id(member)
         if isinstance(idx, ObjectId):
             result = await self.db.pokemon.find_one({"_id": idx, "owned_by": "user"})
-            if result is not None and result["owner_id"] != member.id:
+            if result is not None and result["owner_id"] != matrix_user_id:
                 result = None
         elif idx == -1:
             result = await self.db.pokemon.aggregate(
                 [
-                    {"$match": {"owner_id": member.id, "owned_by": "user"}},
+                    {"$match": {"owner_id": matrix_user_id, "owned_by": "user"}},
                     {"$sort": {"idx": -1}},
                     {"$limit": 1},
                 ],
@@ -900,35 +1008,37 @@ class Mongo(commands.Cog):
             else:
                 result = result[0]
         else:
-            result = await self.db.pokemon.find_one({"owner_id": member.id, "idx": idx, "owned_by": "user"})
+            result = await self.db.pokemon.find_one({"owner_id": matrix_user_id, "idx": idx, "owned_by": "user"})
 
         if result is None:
             return None
 
         return self.Pokemon.build_from_mongo(result)
 
-    async def fetch_guild(self, guild: discord.Guild):
-        g = await self.Guild.find_one({"id": guild.id})
+    async def fetch_guild(self, guild):
+        matrix_space_id = self._matrix_id(guild)
+        g = await self.Guild.find_one({"_id": matrix_space_id})
         if g is None:
-            g = self.Guild(id=guild.id)
+            g = self.Guild(id=matrix_space_id)
             try:
                 await g.commit()
             except pymongo.errors.DuplicateKeyError:
                 pass
         return g
 
-    async def update_guild(self, guild: discord.Guild, update):
-        return await self.db.guild.update_one({"_id": guild.id}, update, upsert=True)
+    async def update_guild(self, guild, update):
+        return await self.db.guild.update_one({"_id": self._matrix_id(guild)}, update, upsert=True)
 
-    async def fetch_channel(self, channel: discord.TextChannel):
-        c = await self.Channel.find_one({"id": channel.id})
+    async def fetch_channel(self, channel):
+        matrix_room_id = self._matrix_id(channel)
+        c = await self.Channel.find_one({"_id": matrix_room_id})
         if c is None:
-            c = self.Channel(id=channel.id)
+            c = self.Channel(id=matrix_room_id)
             await c.commit()
         return c
 
-    async def update_channel(self, channel: discord.TextChannel, update):
-        return await self.db.channel.update_one({"_id": channel.id}, update, upsert=True)
+    async def update_channel(self, channel, update):
+        return await self.db.channel.update_one({"_id": self._matrix_id(channel)}, update, upsert=True)
 
 
 async def setup(bot: commands.Bot):

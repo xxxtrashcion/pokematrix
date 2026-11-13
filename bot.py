@@ -1,239 +1,170 @@
-from __future__ import annotations
-
-import contextlib
-from functools import cached_property
+import asyncio
+import getpass
+import json
 import logging
-from typing import TYPE_CHECKING
+import os
+from pathlib import Path
 
-import aiohttp
-import discord
-import structlog
-import uvloop
-from aioredis_lock import LockTimeoutError, RedisLock
-from discord.ext import commands
-from expiringdict import ExpiringDict
-from pythonjsonlogger import jsonlogger
-
-import cogs
-import helpers
-from helpers import checks
-
-if TYPE_CHECKING:
-    from cogs.data import Data
-    from cogs.mongo import Mongo
-    from cogs.redis import Redis
-    from cogs.sprites import Sprites
-
-uvloop.install()
-
-DEFAULT_DISABLED_MESSAGE = (
-    "The bot's currently disabled. It may be refreshing for some quick updates, or down for another reason. "
-    "Try again later and check the #bot-outages channel in the official server for more details."
+from dotenv import load_dotenv
+from cogs.mongo import MatrixMongo
+from data import DataManager
+from helpers.constants import STARTER_GENERATION, STARTER_POKEMON
+from nio import (
+    AsyncClient,
+    ClientConfig,
+    JoinResponse,
+    LoginResponse,
+    MatrixRoom,
+    RoomMessageText,
+    RoomSendResponse,
+    SyncResponse,
 )
 
-CONCURRENCY_LIMITED_COMMANDS = {
-    "pick",
-    "auction",
-    "market",
-    "incense",
-    "evolve",
-    "favorite",
-    "favoriteall",
-    "nickall",
-    "nickname",
-    "reindex",
-    "release",
-    "releaseall",
-    "select",
-    "unfavorite",
-    "unfavoriteall",
-    "untransform",
-    "buy",
-    "dropitem",
-    "embedcolor",
-    "moveitem",
-    "open",
-    "redeemspawn",
-    "trade",
-    "learn",
-    "event",
-}
+load_dotenv()
+
+USER_ID = os.getenv("MATRIX_USER_ID", "@pokematrix:theeze.dev")
+SESSION_PATH = Path(".matrix-session.json")
+STORE_PATH = ".matrix_store"
 
 
-async def determine_prefix(bot, message):
-    prefixes = [f"<@{bot.user.id}>", f"<@!{bot.user.id}>"]
+async def create_client(homeserver: str) -> AsyncClient:
+    client = AsyncClient(
+        homeserver,
+        USER_ID,
+        store_path=STORE_PATH,
+        config=ClientConfig(store_sync_tokens=True),
+    )
 
-    return prefixes
+    if SESSION_PATH.exists():
+        session = json.loads(SESSION_PATH.read_text())
+        if session["homeserver"] != homeserver or session["user_id"] != USER_ID:
+            await client.close()
+            raise RuntimeError("The saved Matrix session does not match the configured account and homeserver.")
 
-
-class ClusterBot(commands.AutoShardedBot):
-    class BlueEmbed(discord.Embed):
-        def __init__(self, **kwargs):
-            color = kwargs.pop("color", helpers.constants.BLUE)
-            super().__init__(**kwargs, color=color)
-
-    class Embed(discord.Embed):
-        DEFAULT_COLOR = helpers.constants.PINK  # Default embed color, used if custom color is missing
-        CUSTOM_COLOR = None  # Custom embed color, easily changable in an event cog
-
-        def __init__(self, **kwargs):
-            color = kwargs.pop("color", self.CUSTOM_COLOR or self.DEFAULT_COLOR)
-            super().__init__(**kwargs, color=color)
-
-    def __init__(self, **kwargs):
-        self.cluster_name = kwargs.pop("cluster_name")
-        self.cluster_idx = kwargs.pop("cluster_idx")
-        self.config = kwargs.pop("config", None)
-        if self.config is None:
-            self.config = __import__("config")
-
-        self.menus = ExpiringDict(max_len=300, max_age_seconds=300)
-
-        super().__init__(**kwargs, command_prefix=determine_prefix, strip_after_prefix=True)
-
-        # Load extensions
-
-        self.add_check(
-            commands.bot_has_permissions(
-                read_messages=True,
-                send_messages=True,
-                embed_links=True,
-                attach_files=True,
-                read_message_history=True,
-                add_reactions=True,
-                external_emojis=True,
-            ).predicate
+        client.restore_login(
+            user_id=session["user_id"],
+            device_id=session["device_id"],
+            access_token=session["access_token"],
         )
+        return client
 
-        self.add_check(checks.general_check().predicate)
+    password = getpass.getpass(f"Password for {USER_ID}: ")
+    response = await client.login(password, device_name="PokeMatrix development")
+    if not isinstance(response, LoginResponse):
+        await client.close()
+        raise RuntimeError(f"Matrix login failed: {response}")
 
-        self.activity = discord.Game("@Pokétwo help • poketwo.net")
-
-        # Run bot
-
-        self.setup_logging()
-        self.run(kwargs["token"], log_handler=None)
-
-    async def _async_setup_hook(self):
-        await super()._async_setup_hook()
-        self.http.connector = aiohttp.TCPConnector(limit=0)
-
-    def setup_logging(self):
-        self.log: structlog.BoundLogger = structlog.get_logger()
-
-        def add_cluster_name(logger, name, event_dict):
-            event_dict["cluster"] = self.cluster_name
-            return event_dict
-
-        timestamper = structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S")
-        shared_processors = [structlog.stdlib.add_log_level, timestamper, add_cluster_name]
-
-        structlog.configure(
-            processors=[
-                *shared_processors,
-                structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-            ],
-            logger_factory=structlog.stdlib.LoggerFactory(),
-            cache_logger_on_first_use=True,
+    SESSION_PATH.write_text(
+        json.dumps(
+            {
+                "homeserver": homeserver,
+                "user_id": response.user_id,
+                "device_id": response.device_id,
+                "access_token": response.access_token,
+            }
         )
+    )
+    SESSION_PATH.chmod(0o600)
+    return client
 
-        formatter = structlog.stdlib.ProcessorFormatter(
-            # These run ONLY on `logging` entries that do NOT originate within
-            # structlog.
-            foreign_pre_chain=shared_processors,
-            # These run on ALL entries after the pre_chain is done.
-            processors=[
-                # Remove _record & _from_structlog.
-                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-                structlog.dev.ConsoleRenderer() if self.config.DEBUG else structlog.processors.JSONRenderer(),
-            ],
+
+async def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    homeserver = os.getenv("MATRIX_HOMESERVER")
+    room_id = os.getenv("MATRIX_ROOM_ID")
+    if not homeserver or not room_id:
+        raise RuntimeError("Set MATRIX_HOMESERVER and MATRIX_ROOM_ID before starting the bot.")
+
+    game_data = DataManager()
+    client = await create_client(homeserver)
+    persistence = None
+
+    async def reply(room_id: str, text: str) -> None:
+        response = await client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content={"msgtype": "m.text", "body": text},
         )
+        if not isinstance(response, RoomSendResponse):
+            logging.error("Could not send Matrix reply: %s", response)
 
-        handler = logging.StreamHandler()
-        handler.setFormatter(formatter)
-        root_logger = logging.getLogger()
-        root_logger.addHandler(handler)
-        root_logger.setLevel(logging.INFO)
-
-    async def get_context(self, message, *, cls=helpers.context.PoketwoContext):
-        return await super().get_context(message, cls=cls)
-
-    async def is_owner(self, user):
-        if isinstance(user, discord.Member):
-            if any(x.id in (718006431231508481, 930346842586218607, 1120600250474827856) for x in user.roles):
-                return True
-        return await super().is_owner(user)
-
-    # Easy access to things
-
-    @property
-    def mongo(self) -> Mongo:
-        return self.get_cog("Mongo")
-
-    @property
-    def redis(self) -> Redis:
-        return self.get_cog("Redis").pool
-
-    @property
-    def data(self) -> Data:
-        return self.get_cog("Data").instance
-
-    @property
-    def sprites(self) -> Sprites:
-        return self.get_cog("Sprites")
-
-    # Other stuff
-
-    async def send_dm(self, user, *args, **kwargs):
-        if not isinstance(user, discord.abc.Snowflake):
-            user = discord.Object(user)
-
-        with contextlib.suppress(discord.HTTPException):
-            dm = await self.create_dm(user)
-            return await dm.send(*args, **kwargs)
-
-    async def setup_hook(self):
-        self.http_session = aiohttp.ClientSession()
-        await self.load_extension("jishaku")
-        for i in cogs.default:
-            await self.load_extension(f"cogs.{i}")
-
-        if not self.get_command("event"):
-            await self.load_extension(f"cogs.noevent")
-
-        self.log.info(f"init", shard_ids=self.shard_ids, shard_count=self.shard_count)
-
-    async def on_ready(self):
-        self.log.info("ready")
-
-    async def on_shard_ready(self, shard_id):
-        self.log.info("shard_ready", shard_id=shard_id)
-
-    async def on_message(self, message: discord.Message):
-        message.content = message.content.replace("—", "--").replace("'", "′").replace("‘", "′").replace("’", "′")
-        await self.process_commands(message)
-
-    @cached_property
-    def concurrency_limited_commands(self) -> list:
-        return [self.get_command(command_name) for command_name in CONCURRENCY_LIMITED_COMMANDS]
-
-    async def invoke(self, ctx):
-        if ctx.command is None:
+    async def on_message(room: MatrixRoom, event: RoomMessageText) -> None:
+        if event.sender == client.user_id or room.room_id != room_id:
             return
 
-        concurrency_limited_command_names = [command.name for command in self.concurrency_limited_commands]
-        if not (
-            ctx.command.name in concurrency_limited_command_names
-            or (ctx.command.root_parent and ctx.command.root_parent.name in concurrency_limited_command_names)
-        ):
-            return await super().invoke(ctx)
+        logging.info("Message in %s from %s", room.room_id, event.sender)
+        command, _, argument = event.body.strip().partition(" ")
+        command = command.casefold()
 
-        try:
-            async with RedisLock(self.redis, f"command:{ctx.author.id}", 60, 1):
-                return await super().invoke(ctx)
-        except LockTimeoutError:
-            await ctx.reply("You are currently running another command. Please wait and try again later.")
+        if command == "!matrix-ping":
+            if persistence is not None:
+                await persistence.ensure_member(event.sender, room.user_name(event.sender))
+                logging.info("Matrix player profile ready for %s", event.sender)
+            await reply(room.room_id, "PokeMatrix is online.")
+        elif command == "!start":
+            if argument:
+                await reply(room.room_id, "Choose a starter with `!pick <name>`; run `!start` to see the choices.")
+                return
 
-    async def close(self):
-        self.log.info("close")
-        await super().close()
+            choices = "\n".join(f"{generation}: {', '.join(names)}" for generation, names in STARTER_GENERATION.items())
+            await reply(room.room_id, f"Choose your starter with `!pick <name>`:\n{choices}")
+        elif command == "!pick":
+            if not argument:
+                await reply(room.room_id, "Usage: `!pick <starter name>`. Run `!start` to see the choices.")
+                return
+            if persistence is None:
+                await reply(
+                    room.room_id, "Starter selection needs MongoDB. Configure the Matrix database settings first."
+                )
+                return
+
+            species = game_data.species_by_name(argument)
+            if species is None or species.name.casefold() not in STARTER_POKEMON:
+                await reply(room.room_id, "That isn't a starter. Run `!start` to see the available choices.")
+                return
+
+            selected = await persistence.start_player(event.sender, species, room.user_name(event.sender))
+            if selected:
+                await reply(room.room_id, f"You chose {species.name}! Your first Pokémon is saved to your collection.")
+            else:
+                await reply(room.room_id, "You already have a starter Pokémon. Use `!pokemon` to view your collection.")
+
+    try:
+        database_uri = os.getenv("MATRIX_DATABASE_URI")
+        database_name = os.getenv("MATRIX_DATABASE_NAME")
+        if bool(database_uri) != bool(database_name):
+            raise RuntimeError("Set both MATRIX_DATABASE_URI and MATRIX_DATABASE_NAME to enable persistence.")
+        if database_uri and database_name:
+            persistence = MatrixMongo.connect(database_uri, database_name)
+            await persistence.ping()
+            logging.info("Connected to Matrix database %s", database_name)
+
+        join_response = await client.join(room_id)
+        if not isinstance(join_response, JoinResponse):
+            raise RuntimeError(f"Could not join Matrix room {room_id}: {join_response}")
+
+        sync_response = await client.sync(timeout=0, full_state=True)
+        if not isinstance(sync_response, SyncResponse):
+            raise RuntimeError(f"Could not sync with the Matrix homeserver: {sync_response}")
+
+        matrix_room = client.rooms.get(room_id)
+        if matrix_room is not None and matrix_room.encrypted:
+            raise RuntimeError(
+                f"Matrix room {room_id} is encrypted, but end-to-end encryption is not enabled. "
+                "Create a new unencrypted room and update MATRIX_ROOM_ID."
+            )
+
+        client.add_event_callback(on_message, RoomMessageText)
+        logging.info("Listening in Matrix room %s as %s", room_id, client.user_id)
+        await client.sync_forever(timeout=30000)
+    finally:
+        await client.close()
+        if persistence is not None:
+            persistence.close()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

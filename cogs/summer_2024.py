@@ -31,7 +31,7 @@ from discord.ext.commands import check
 from lib.box_rewards import Reward, RewardItem, give_rewards, simulate_rewards
 
 if TYPE_CHECKING:
-    from bot import ClusterBot
+    from typing import Any as ClusterBot
 
 
 # region CONSTANTS

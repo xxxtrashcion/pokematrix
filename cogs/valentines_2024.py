@@ -26,7 +26,7 @@ from helpers.context import PoketwoContext
 from helpers.utils import FlavorString
 
 if TYPE_CHECKING:
-    from bot import ClusterBot
+    from typing import Any as ClusterBot
 
 # GENERAL
 

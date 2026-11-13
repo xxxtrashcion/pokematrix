@@ -27,7 +27,7 @@ from helpers.utils import FlavorString, unwind, write_fp
 from lib.probability import random_iv_composition
 
 if TYPE_CHECKING:
-    from bot import ClusterBot
+    from typing import Any as ClusterBot
 
 # GENERAL
 

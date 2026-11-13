@@ -24,7 +24,7 @@ from helpers.converters import PokemonConverter, strfdelta
 from helpers.utils import FlavorString, unwind
 
 if TYPE_CHECKING:
-    from bot import ClusterBot
+    from typing import Any as ClusterBot
 
 
 NL = "\n"
