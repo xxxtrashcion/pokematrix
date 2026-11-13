@@ -10,6 +10,7 @@ import discord
 
 from data.models import Species
 from helpers.utils import FlavorString
+from game.rewards.selection import select_amount, select_rewards
 
 if TYPE_CHECKING:
     from bot import ClusterBot
@@ -132,17 +133,13 @@ async def give_rewards(
     """
 
     member = await bot.mongo.fetch_member_info(user)
-    weights = [reward.chance for reward in rewards]
-
-    if sum(weights) not in (1, 100):
-        raise ValueError("Chances of rewards must add up to a total of 1 or 100 (100%)")
 
     update = {"$inc": {"balance": 0, "premium_balance": 0, "redeems": 0}}
     inserts = []
     text = []
 
-    for reward in random.choices(rewards, weights=weights, k=k):
-        count = random.choice(reward.amounts)
+    for reward in select_rewards(rewards, k=k):
+        count = select_amount(reward.amounts)
 
         item = reward.item
         match item:
@@ -309,17 +306,13 @@ def simulate_rewards(
         The simulated rewards text
     """
 
-    weights = [reward.chance for reward in rewards]
-
-    if sum(weights) not in (1, 100):
-        raise ValueError("Chances of rewards must add up to a total of 1 or 100 (100%)")
-
     simulated_rewards = defaultdict(lambda: BaseSimulatedReward()) | {
         reward.item: BaseSimulatedReward(shiny_possible="pokemon" in reward.item.id, reward=reward)
         for reward in rewards
     }
-    for reward in random.choices(rewards, weights=weights, k=k):
-        count = random.choice(reward.amounts)
+
+    for reward in select_rewards(rewards, k=k):
+        count = select_amount(reward.amounts)
         item = reward.item
 
         match item:
@@ -345,8 +338,10 @@ def simulate_rewards(
                         raise ValueError(
                             "Invalid object passed into Reward.species_ids, must be list or ids or dict of id-weight pairs"
                         )
+
                     species_id = random.choices(population, pokemon_weights, k=1)[0]
                     simulated_rewards[item].pokemon[species_id].increment(count)
+
                     if shiny:
                         simulated_rewards[item].pokemon[species_id].shiny.increment(count)
 
