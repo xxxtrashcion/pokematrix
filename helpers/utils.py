@@ -13,7 +13,7 @@ from data.utils import comma_formatted
 from helpers.constants import CharacterLimits
 
 if TYPE_CHECKING:
-    from bot import ClusterBot
+    from typing import Any as ClusterBot
 
 
 @dataclass

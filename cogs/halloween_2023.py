@@ -22,7 +22,7 @@ from helpers.pagination import ContinuablePages, FunctionPageSource
 from helpers.utils import FlavorString, make_slider, unwind
 
 if TYPE_CHECKING:
-    from bot import ClusterBot
+    from typing import Any as ClusterBot
 
 
 STORY_URL = "https://gist.github.com/WitherredAway/5eadc92aa630df36abeefa8a5f2dc200"

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Callable, List, Optional
 from helpers import pagination
 
 if TYPE_CHECKING:
-    from bot import ClusterBot
+    from typing import Any as ClusterBot
 
 
 @dataclass(kw_only=True)

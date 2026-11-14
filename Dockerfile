@@ -11,4 +11,4 @@ COPY pyproject.toml poetry.lock ./
 RUN poetry install --no-root --without dev
 
 COPY . .
-CMD ["python", "launcher.py"]
+CMD ["python", "bot.py"]

@@ -1,6 +1,9 @@
 config.py
 .env
+/spam.env
 .direnv
+.matrix-session.json
+.matrix_store/
 **/.DS_Store
 logs/
 utils/

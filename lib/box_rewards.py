@@ -13,7 +13,7 @@ from helpers.utils import FlavorString
 from game.rewards.selection import select_amount, select_rewards
 
 if TYPE_CHECKING:
-    from bot import ClusterBot
+    from typing import Any as ClusterBot
 
 
 class Rarity(Flag):

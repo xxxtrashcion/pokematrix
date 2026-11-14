@@ -26,7 +26,7 @@ from helpers import checks, constants, converters, flags, genders, pagination
 from helpers.context import PoketwoContext
 
 if TYPE_CHECKING:
-    from bot import ClusterBot
+    from typing import Any as ClusterBot
 
 
 def isfloat(x):

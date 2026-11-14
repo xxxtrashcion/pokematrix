@@ -18,7 +18,7 @@ from helpers.utils import add_moves_field
 from game.battling.turn_order import get_priority
 
 if TYPE_CHECKING:
-    from bot import ClusterBot
+    from typing import Any as ClusterBot
 
 
 def in_battle(bool=True):
