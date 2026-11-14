@@ -5,6 +5,7 @@ import math
 import pickle
 import random
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import discord
@@ -19,16 +20,11 @@ from cogs.incenses import DEFAULT_INTERVAL, Incense
 from data import models
 from helpers import constants
 from helpers.genders import generate_gender
-from lib.probability import random_iv_composition
-
-random_iv = lambda: random.randint(0, 31)
-random_nature = lambda: random.choice(constants.NATURES)
+from game.pokemon import iv_percent_to_total, make_pokemon_data, random_iv, random_nature
+from game.pokedex import get_pokedex_milestones
+from game.spawning import pokedex_reward, rolls_gigantamax
 
 # Instance
-
-
-def iv_percent_to_total(percent: float) -> int:
-    return math.ceil(percent / 100 * 186)
 
 
 def iv_total_to_percent(total_iv: int, *, round_to: Optional[int] = 2) -> float:
@@ -618,21 +614,165 @@ class Sponsor(Document):
     reward_tier = fields.IntegerField()
 
 
+MODEL_NAMES = (
+    "PokemonBase",
+    "Pokemon",
+    "EmbeddedPokemon",
+    "Member",
+    "Guild",
+    "Channel",
+    "Counter",
+    "Blacklist",
+    "Sponsor",
+)
+
+
+def register_models(database, bot_context):
+    """Register the original game models against a Mongo database.
+
+    Both the Discord and Matrix persistence adapters use this function so
+    they share the same Umongo document definitions. ``bot_context`` must
+    provide the services accessed by those models (currently ``data`` for
+    species and move lookups).
+    """
+    instance = Instance(database)
+    registered = {}
+
+    for model_name in MODEL_NAMES:
+        model = instance.register(globals()[model_name])
+        model.bot = bot_context
+        registered[model_name] = model
+
+    return registered
+
+
 class MatrixMongo:
-    def __init__(self, database, client=None):
+    def __init__(self, database, client=None, game_data=None):
         self.database = database
         self.client = client
+        self.models = {}
+
+        if game_data is not None:
+            # The original models need access to the shared species/move data,
+            # but they should not depend on a Discord bot instance.
+            self.model_context = SimpleNamespace(data=game_data)
+            self.models = register_models(database, self.model_context)
+            for model_name, model in self.models.items():
+                setattr(self, model_name, model)
 
     @classmethod
-    def connect(cls, uri: str, database_name: str):
+    def connect(cls, uri: str, database_name: str, game_data=None):
         client = AsyncIOMotorClient(uri)
-        return cls(client[database_name], client)
+        return cls(client[database_name], client, game_data=game_data)
 
     async def ping(self):
         return await self.database.command("ping")
 
     async def fetch_member(self, matrix_user_id: str):
         return await self.database.member.find_one({"_id": matrix_user_id})
+
+    async def fetch_selected_pokemon(self, matrix_user_id: str):
+        """Load the original member and their currently selected Pokémon."""
+        if not self.models:
+            raise RuntimeError("MatrixMongo must register the original game models before loading selected Pokémon.")
+
+        member = await self.Member.find_one({"_id": matrix_user_id})
+        if member is None or member.selected_id is None:
+            return member, None
+
+        pokemon_document = await self.database.pokemon.find_one(
+            {
+                "_id": member.selected_id,
+                "owner_id": matrix_user_id,
+                "owned_by": "user",
+            }
+        )
+        if pokemon_document is None:
+            return member, None
+
+        return member, self.Pokemon.build_from_mongo(pokemon_document)
+
+    async def update_pokemon(self, pokemon, update: dict):
+        """Apply an update to a Pokémon using the Matrix database handle."""
+        if isinstance(pokemon, dict) and "_id" in pokemon:
+            pokemon = self.Pokemon.build_from_mongo(pokemon)
+
+        pokemon_id = getattr(pokemon, "id", None)
+        if pokemon_id is None:
+            pokemon_id = getattr(pokemon, "_id", None)
+        if pokemon_id is None:
+            raise ValueError("Cannot update a Pokémon without a database id.")
+
+        # Match the original Mongo adapter: lazily persist the model's
+        # generated gender when the Pokémon has not had one assigned yet.
+        if getattr(pokemon, "_gender", None) is None and "gender" not in update:
+            update.setdefault("$set", {})["gender"] = pokemon.gender
+
+        return await self.database.pokemon.update_one({"_id": pokemon_id}, update)
+
+    async def fetch_guild(self, room_id: str):
+        """Fetch the original room settings model used by shared game mechanics."""
+        if not self.models:
+            raise RuntimeError("MatrixMongo must register the original game models before fetching room settings.")
+
+        guild = await self.Guild.find_one({"_id": room_id})
+        if guild is not None:
+            return guild
+
+        guild = self.Guild(id=room_id)
+        try:
+            await guild.commit()
+        except pymongo.errors.DuplicateKeyError:
+            guild = await self.Guild.find_one({"_id": room_id})
+        return guild
+
+    async def fetch_pokemon_list(self, matrix_user_id: str):
+        cursor = self.database.pokemon.find(
+            {
+                "owner_id": matrix_user_id,
+                "owned_by": "user",
+            }
+        ).sort("idx", 1)
+        documents = await cursor.to_list(length=None)
+
+        # Use the original Umongo Pokemon document whenever the shared game
+        # models have been registered. The raw-document fallback keeps the
+        # lightweight persistence tests usable without a DataManager.
+        if not self.models:
+            return documents
+
+        return [self.Pokemon.build_from_mongo(document) for document in documents]
+
+    async def select_pokemon(self, matrix_user_id: str, selection: str):
+        """Select one of the player's Pokémon by collection number or latest alias."""
+        selection = selection.strip().casefold()
+        query = {"owner_id": matrix_user_id, "owned_by": "user"}
+        if selection in {"latest", "l", "0"}:
+            cursor = self.database.pokemon.find(query).sort("idx", -1)
+            documents = await cursor.to_list(length=1)
+            document = documents[0] if documents else None
+        else:
+            try:
+                index = int(selection)
+            except ValueError:
+                return None
+            if index < 1:
+                return None
+            document = await self.database.pokemon.find_one({**query, "idx": index})
+
+        if document is None:
+            return None
+
+        result = await self.database.member.update_one(
+            {"_id": matrix_user_id},
+            {"$set": {"selected_id": document["_id"]}},
+        )
+        if result.matched_count == 0:
+            return None
+
+        if self.models:
+            return self.Pokemon.build_from_mongo(document)
+        return document
 
     async def ensure_member(self, matrix_user_id: str, username: Optional[str] = None):
         update = {"$setOnInsert": {"selected_id": None}}
@@ -641,46 +781,241 @@ class MatrixMongo:
         await self.database.member.update_one({"_id": matrix_user_id}, update, upsert=True)
         return await self.fetch_member(matrix_user_id)
 
+    async def fetch_wild_spawn(self, room_id: str):
+        return await self.database.wild_spawn.find_one({"_id": room_id})
+
+    async def set_wild_spawn(self, room_id: str, species_id: int, gender: str):
+        """Replace the room's current wild spawn and return the previous spawn, if any."""
+        previous = await self.fetch_wild_spawn(room_id)
+        await self.database.wild_spawn.replace_one(
+            {"_id": room_id},
+            {
+                "_id": room_id,
+                "species_id": species_id,
+                "gender": gender,
+                "spawned_at": datetime.utcnow(),
+            },
+            upsert=True,
+        )
+        return previous
+
+    async def catch_wild_spawn(self, room_id: str, matrix_user_id: str, species):
+        """Atomically claim a room spawn, create its Pokémon, and update Pokédex rewards."""
+        if not self.models:
+            raise RuntimeError("MatrixMongo must register the original game models before catching Pokémon.")
+
+        claimed = await self.database.wild_spawn.find_one_and_update(
+            {
+                "_id": room_id,
+                "species_id": species.id,
+                "caught_by": {"$exists": False},
+            },
+            {"$set": {"caught_by": matrix_user_id}},
+            return_document=pymongo.ReturnDocument.BEFORE,
+        )
+        if claimed is None:
+            return None
+
+        inserted = False
+        try:
+            member = await self.Member.find_one({"_id": matrix_user_id})
+            if member is None or member.selected_id is None:
+                return None
+
+            # Match the original Mongo adapter's atomic index reservation.
+            index_record = await self.database.member.find_one_and_update(
+                {"_id": matrix_user_id},
+                {"$inc": {"next_idx": 1}},
+                projection={"next_idx": 1},
+                return_document=pymongo.ReturnDocument.BEFORE,
+            )
+            idx = (index_record or {}).get("next_idx", 1)
+            pokemon_data = make_pokemon_data(
+                member,
+                species,
+                owner_id=matrix_user_id,
+                idx=idx,
+                gender=claimed.get("gender"),
+            )
+            gmax = rolls_gigantamax(species)
+            if gmax:
+                pokemon_data["species_id"] = species.gmax.id
+            pokemon_document = {
+                "_id": ObjectId(),
+                "timestamp": datetime.utcnow(),
+                **pokemon_data,
+            }
+            await self.database.pokemon.insert_one(pokemon_document)
+            inserted = True
+            pokemon = self.Pokemon.build_from_mongo(pokemon_document)
+
+            dex_key = str(species.dex_number)
+            current_count = (member.pokedex or {}).get(dex_key, 0)
+            reward = pokedex_reward(current_count)
+            update = {"$inc": {f"pokedex.{dex_key}": 1}}
+            increments = update["$inc"]
+            if reward:
+                increments["balance"] = reward
+            if pokemon.shiny:
+                increments["shinies_caught"] = 1
+            if gmax:
+                increments["gmax_caught"] = 1
+            if member.shiny_hunt == species.dex_number:
+                if pokemon.shiny:
+                    update["$set"] = {"shiny_streak": 0}
+                else:
+                    increments["shiny_streak"] = 1
+
+            await self.database.member.update_one({"_id": matrix_user_id}, update)
+            await self.database.wild_spawn.delete_one({"_id": room_id, "caught_by": matrix_user_id})
+            return {
+                "pokemon": pokemon,
+                "pokedex_reward": reward,
+                "shiny_hunt": member.shiny_hunt == species.dex_number,
+                "gmax": gmax,
+            }
+        finally:
+            # Release the claim only if no Pokémon was inserted. Once saved,
+            # keeping the spawn claimed prevents a retry from creating duplicates.
+            if not inserted:
+                await self.database.wild_spawn.update_one(
+                    {"_id": room_id, "caught_by": matrix_user_id},
+                    {"$unset": {"caught_by": ""}},
+                )
+
+    async def claim_pokedex_milestones(self, matrix_user_id: str):
+        """Claim unlocked Pokédex milestones and award their original-game Pokémon."""
+        if not self.models:
+            raise RuntimeError("MatrixMongo must register the original game models before claiming milestones.")
+
+        member = await self.Member.find_one({"_id": matrix_user_id})
+        if member is None:
+            return []
+
+        milestones = get_pokedex_milestones(member.pokedex or {}, member.claimed_pokedex_rewards or {})
+        claimable = [progress for progress in milestones if progress.unclaimed]
+        if not claimable:
+            return []
+
+        reward_species = {}
+        for progress in claimable:
+            species_id = progress.milestone.reward_species_id
+            species = self.model_context.data.species_by_number(species_id)
+            if species is None:
+                raise RuntimeError(f"Pokédex reward Pokémon {species_id} is missing from game data.")
+            reward_species[progress.milestone.key] = species
+
+        claim_fields = {
+            f"claimed_pokedex_rewards.{progress.milestone.key}": True
+            for progress in claimable
+        }
+        claim_filter = {
+            "_id": matrix_user_id,
+            **{
+                f"claimed_pokedex_rewards.{progress.milestone.key}": {"$ne": True}
+                for progress in claimable
+            },
+        }
+        result = await self.database.member.update_one(claim_filter, {"$set": claim_fields})
+        if result.matched_count == 0:
+            return []
+
+        reservation = await self.database.member.find_one_and_update(
+            {"_id": matrix_user_id},
+            {"$inc": {"next_idx": sum(progress.milestone.reward_count for progress in claimable)}},
+            projection={"next_idx": 1},
+            return_document=pymongo.ReturnDocument.BEFORE,
+        )
+        if reservation is None:
+            await self.database.member.update_one(
+                {"_id": matrix_user_id, **claim_fields},
+                {"$unset": {field: "" for field in claim_fields}},
+            )
+            return []
+
+        first_idx = reservation.get("next_idx", 1)
+        pokemon_documents = []
+        reward_rows = []
+        next_idx = first_idx
+        try:
+            for progress in claimable:
+                milestone = progress.milestone
+                reward_pokemon = []
+                for _ in range(milestone.reward_count):
+                    pokemon_document = {
+                        "_id": ObjectId(),
+                        "timestamp": datetime.utcnow(),
+                        **make_pokemon_data(
+                            member,
+                            reward_species[milestone.key],
+                            owner_id=matrix_user_id,
+                            idx=next_idx,
+                            shiny_boost=15,
+                        ),
+                    }
+                    next_idx += 1
+                    pokemon_documents.append(pokemon_document)
+                    reward_pokemon.append(self.Pokemon.build_from_mongo(pokemon_document))
+                reward_rows.append({"milestone": milestone.title, "pokemon": reward_pokemon})
+
+            if pokemon_documents:
+                await self.database.pokemon.insert_many(pokemon_documents)
+        except Exception:
+            if pokemon_documents:
+                await self.database.pokemon.delete_many(
+                    {"_id": {"$in": [pokemon["_id"] for pokemon in pokemon_documents]}}
+                )
+            await self.database.member.update_one(
+                {"_id": matrix_user_id, **claim_fields},
+                {"$unset": {field: "" for field in claim_fields}},
+            )
+            raise
+
+        return reward_rows
+
     async def start_player(
         self,
         matrix_user_id: str,
         species: models.Species,
         display_name: Optional[str] = None,
     ) -> bool:
-        member = await self.ensure_member(matrix_user_id, display_name)
-        if member.get("selected_id") is not None:
+        profile = await self.ensure_member(matrix_user_id, display_name)
+        if profile.get("selected_id") is not None:
             return False
+        if not hasattr(self, "Member"):
+            raise RuntimeError("MatrixMongo must register the original game models before creating a starter.")
 
+        member = await self.Member.find_one({"_id": matrix_user_id})
+        if member is None:
+            raise RuntimeError(f"Could not load the Matrix player profile for {matrix_user_id}.")
+
+        # Use the same Pokémon-generation rules as the original Mongo adapter.
+        # Starter level remains 1, but shiny chance, nature, IVs, gender and
+        # level-eligible moves all come from the shared game logic.
+        idx = member.next_idx or 1
         pokemon_id = ObjectId()
-        ivs = [random_iv() for _ in range(6)]
-        level = 1
-        possible_moves = [move.move.id for move in species.moves if move.method.level <= level]
         pokemon = {
             "_id": pokemon_id,
             "timestamp": datetime.utcnow(),
-            "owner_id": matrix_user_id,
-            "owned_by": "user",
-            "idx": 1,
-            "species_id": species.id,
-            "level": level,
-            "xp": 0,
-            "nature": random_nature(),
-            "shiny": random.randint(1, 4096) == 1,
-            "gender": generate_gender(species, _id=pokemon_id),
-            "iv_hp": ivs[0],
-            "iv_atk": ivs[1],
-            "iv_defn": ivs[2],
-            "iv_satk": ivs[3],
-            "iv_sdef": ivs[4],
-            "iv_spd": ivs[5],
-            "iv_total": sum(ivs),
-            "moves": random.sample(possible_moves, k=min(len(possible_moves), 4)),
+            **make_pokemon_data(
+                member,
+                species,
+                owner_id=matrix_user_id,
+                idx=idx,
+                fixed_level=1,
+            ),
         }
 
         await self.database.pokemon.insert_one(pokemon)
         result = await self.database.member.update_one(
             {"_id": matrix_user_id, "selected_id": None},
-            {"$set": {"selected_id": pokemon_id, "joined_at": datetime.utcnow(), "next_idx": 2}},
+            {
+                "$set": {
+                    "selected_id": pokemon_id,
+                    "joined_at": datetime.utcnow(),
+                    "next_idx": idx + 1,
+                }
+            },
         )
         if result.matched_count == 0:
             await self.database.pokemon.delete_one({"_id": pokemon_id})
@@ -700,23 +1035,9 @@ class Mongo(commands.Cog):
         self.bot = bot
         self.client = AsyncIOMotorClient(bot.config.DATABASE_URI, io_loop=bot.loop)
         self.db = self.client[bot.config.DATABASE_NAME]
-        instance = Instance(self.db)
-
-        g = globals()
-
-        for x in (
-            "PokemonBase",
-            "Pokemon",
-            "EmbeddedPokemon",
-            "Member",
-            "Guild",
-            "Channel",
-            "Counter",
-            "Blacklist",
-            "Sponsor",
-        ):
-            setattr(self, x, instance.register(g[x]))
-            getattr(self, x).bot = bot
+        registered_models = register_models(self.db, bot)
+        for model_name, model in registered_models.items():
+            setattr(self, model_name, model)
 
     @staticmethod
     def _matrix_id(value) -> str:
@@ -929,40 +1250,17 @@ class Mongo(commands.Cog):
         if not is_member_document:
             member = await self.fetch_member_info(member)
 
-        ivs = [random_iv() for _ in range(6)]
-        if min_iv_percent > 0 or max_iv_percent < 100:
-            min_iv = iv_percent_to_total(min_iv_percent)
-            max_iv = iv_percent_to_total(max_iv_percent)
-            ivs = random_iv_composition(sum_lower_bound=min_iv, sum_upper_bound=max_iv)
-
-        level = min(max(int(random.normalvariate(20, 10)), 1), 50)
-        shiny = member.determine_shiny(species, boost=shiny_boost)
-        gender = generate_gender(species)
-
-        possible_moves = [x.move.id for x in species.moves if level >= x.method.level]
-        moves = random.sample(possible_moves, k=min(len(possible_moves), 4))
         idx = kwargs.pop("idx", None) or await self.fetch_next_idx(member)
-
-        return {
-            "owner_id": self._matrix_id(member),
-            "owned_by": "user",
-            "species_id": species.id,
-            "level": level,
-            "xp": 0,
-            "nature": random_nature(),
-            "iv_hp": ivs[0],
-            "iv_atk": ivs[1],
-            "iv_defn": ivs[2],
-            "iv_satk": ivs[3],
-            "iv_sdef": ivs[4],
-            "iv_spd": ivs[5],
-            "iv_total": sum(ivs),
-            "shiny": shiny,
-            "gender": gender,
-            "moves": moves,
-            "idx": idx,
+        return make_pokemon_data(
+            member,
+            species,
+            owner_id=self._matrix_id(member),
+            idx=idx,
+            shiny_boost=shiny_boost,
+            min_iv_percent=min_iv_percent,
+            max_iv_percent=max_iv_percent,
             **kwargs,
-        }
+        )
 
     async def update_member(self, member, update):
         matrix_user_id = self._matrix_id(member)

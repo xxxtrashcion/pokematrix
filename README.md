@@ -61,6 +61,12 @@ MATRIX_DATABASE_NAME=pokematrix_matrix
 
 Start the bot with `poetry run python bot.py`. On first start, it prompts for the account password and saves the session locally in `.matrix-session.json`. In the room, send `!matrix-ping` to check that the bot can receive and reply to messages. Send `!start` to see starter choices, then `!pick Bulbasaur` (or another listed starter) to choose one. Starter selection requires both database settings; it creates the player in the existing `member` collection and the starter in `pokemon`. Use an unencrypted room for now; end-to-end encryption is not enabled.
 
+### Sending test activity
+
+To test chat-based XP and spawning, create a dedicated Matrix test account and join it to the development room. Add its user ID and password to the local, Git-ignored `.env` as `MATRIX_TEST_USER_ID` and `MATRIX_TEST_PASSWORD`. The activity sender uses `MATRIX_ROOM_ID` by default; set `MATRIX_TEST_ROOM_ID` only if the test account should send to a different room. It logs in for that run and sends ordinary messages; it does not save a session or include credentials in messages.
+
+Run `poetry run python scripts/matrix_activity_sender.py`. By default it sends 24 messages, 1.6 seconds apart, which is enough to trigger one spawn while respecting the XP cooldown. Use `--count` and `--interval` to adjust the run; the script caps runs at 200 messages and requires at least 1.5 seconds between them. To keep test-account credentials in a separate ignored file, use `--env-file spam.env`; the sender loads `.env` first for the homeserver and room, then overlays values from the specified file. Add `--check` to validate configuration without logging in or sending messages.
+
 ## Credits and Acknowledgements
 
 PokeMatrix builds upon the work and ideas of projects that helped establish Pokémon collecting bots in online communities.
